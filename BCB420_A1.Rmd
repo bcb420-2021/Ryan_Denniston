@@ -36,24 +36,29 @@ query <- paste("SELECT DISTINCT gse.title, gse.gse, gpl.title,",
 " gpl.organism LIKE '%Homo sapiens%' AND",
 " gpl.technology LIKE '%high-throughput seq%' AND",
 " gse.title LIKE '%stem cell%' ", sep=" ")
-query
+
 (rs <- DBI::dbGetQuery(con, query))
 
 ```
 ```{r}
-rs[234, ]
-rs[234, ]$"supplementary_file"
+rs[168, ]
+rs[168, ]$"supplementary_file"
 
-file_ftp <- unlist(strsplit(rs[234, ]$"supplementary_file", ";"))
+file_ftp <- unlist(strsplit(rs[168, ]$"supplementary_file", ";"))
 
 (filename <- tail(unlist(strsplit(file_ftp[1], "/")), n = 1))
 ```
 ```{r}
-GEOquery::getGEOSuppFiles('GSE84166')
+GEOquery::getGEOSuppFiles('GSE74201')
 
 ```
 
 ```{r}
-head(read.table("GSE84166/GSE84166_rpkm.txt", sep = "\t", header = TRUE))
-```
+countsDF <- read.csv("GSE74201/GSE74201_rawReadCounts.csv")
 
+#renaming columns to match sample names on GEO
+colnames(countsDF) <- c("gene", "C116_NSC_1", "C116_NSC_2", "C116_NSC_3", "C116_NSC_4", "C116_NSC_5", "C116_NSC_6", "C116_NSC_7", "C116_NSC_8", "C116_iPSC_1", "C116_iPSC_2", "C116_iPSC_3", "C116_iPSC_4", "C116_iPSC_5", "C116_iPSC_6", "C116_iPSC_7", "C116_iPSC_8", "HD_NSC_1", "HD_NSC_2", "HD_NSC_3", "HD_NSC_4", "HD_NSC_5", "HD_NSC_6", "HD_NSC_7", "HD_NSC_8", "HD_iPSC_1", "HD_iPSC_2", "HD_iPSC_3", "HD_iPSC_4", "HD_iPSC_5", "HD_iPSC_6", "HD_iPSC_7", "HD_iPSC_8")
+
+countsDF
+```
+Based on the file names in the untarred GSE74201_RAW.tar folder and the GEO webpage for this accession, the first 8 columns after the gene column are healthy Neural Stem Cells(NSC), the  next second 8 are healthy induced pluripotent stem cells (iPSC), then 8 Huntingtons disease NSC replicates then 8 iPSC Huntington's disease replicates.
