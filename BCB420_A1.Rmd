@@ -1,14 +1,17 @@
 ---
-title: "R Notebook"
-output: html_notebook
+title: 'Assignment 1: Data set selection and initial Processing'
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
 ---
 
-This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
-
-Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+### Data Set Search and Selection
 
 ```{r}
-#
+#install necessary packages for dataset search
 if (!requireNamespace("BiocManager", quietly = TRUE))
 install.packages("BiocManager")
 
@@ -18,11 +21,8 @@ BiocManager::install("GEOmetadb")
 if(!file.exists('GEOmetadb.sqlite')) GEOmetadb::getSQLiteFile()
 ```
 
-Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+Here we search GEO for human high throughput sequencing experiments from the last 10 years with terms similar to "stem cells" in the title, and retrieve the associated paper title, the series id, the name of the platform used in the sequencing, the date the data was submitted to GEO, and the names of any supplementary files associated with the series.
 
-When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
-
-The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
 ```{r}
 con <- DBI::dbConnect(RSQLite::SQLite(),'GEOmetadb.sqlite')
 
@@ -40,25 +40,307 @@ query <- paste("SELECT DISTINCT gse.title, gse.gse, gpl.title,",
 (rs <- DBI::dbGetQuery(con, query))
 
 ```
+
 ```{r}
 rs[168, ]
-rs[168, ]$"supplementary_file"
 
 file_ftp <- unlist(strsplit(rs[168, ]$"supplementary_file", ";"))
 
 (filename <- tail(unlist(strsplit(file_ftp[1], "/")), n = 1))
 ```
+We will select the data from the experiment titled "Genomic Analysis Reveals Disruption of Striatal Neuronal Development and Therapeutic Targets in a Human Neural Stem Cell Model of Huntington’s Disease". I am interested in this dataset because I find stem cells interesting as models for disease and I am learning about stem cells in some of my other courses.
 ```{r}
+#download the supplementary files for this series
 GEOquery::getGEOSuppFiles('GSE74201')
-
 ```
+### Data Cleaning
 
 ```{r}
 countsDF <- read.csv("GSE74201/GSE74201_rawReadCounts.csv")
 
 #renaming columns to match sample names on GEO
 colnames(countsDF) <- c("gene", "C116_NSC_1", "C116_NSC_2", "C116_NSC_3", "C116_NSC_4", "C116_NSC_5", "C116_NSC_6", "C116_NSC_7", "C116_NSC_8", "C116_iPSC_1", "C116_iPSC_2", "C116_iPSC_3", "C116_iPSC_4", "C116_iPSC_5", "C116_iPSC_6", "C116_iPSC_7", "C116_iPSC_8", "HD_NSC_1", "HD_NSC_2", "HD_NSC_3", "HD_NSC_4", "HD_NSC_5", "HD_NSC_6", "HD_NSC_7", "HD_NSC_8", "HD_iPSC_1", "HD_iPSC_2", "HD_iPSC_3", "HD_iPSC_4", "HD_iPSC_5", "HD_iPSC_6", "HD_iPSC_7", "HD_iPSC_8")
-
-countsDF
+head(countsDF)
 ```
-Based on the file names in the untarred GSE74201_RAW.tar folder and the GEO webpage for this accession, the first 8 columns after the gene column are healthy Neural Stem Cells(NSC), the  next second 8 are healthy induced pluripotent stem cells (iPSC), then 8 Huntingtons disease NSC replicates then 8 iPSC Huntington's disease replicates.
+
+Based on the file names in the untarred GSE74201_RAW.tar folder and the GEO webpage for this accession, as well as the first associated paper, the first 8 columns after the gene column are healthy Neural Stem Cells(NSC) derived from isogenic iPSCs, the  next second 8 are "healthy" isogenic induced pluripotent stem cells (iPSC) that have had the disease causing CAG repeats removed , then 8 Huntingtons disease NSC replicates then 8 iPSC Huntington's disease replicates. To summarize, samples containing "C116" have no disease causing CAG repeat, and cells containing "HD" do.
+
+```{r}
+#install edgeR if not already installed
+if (!requireNamespace("edgeR", quietly = TRUE))
+install.packages("edgeR")
+
+cpmDF <- edgeR::cpm(countsDF[ ,2:33])
+rownames(cpmDF) <- countsDF$gene
+
+# remove rows where at no sample has more than 1 RPKM
+cpmDF_filtered <- cpmDF[rowSums(cpmDF > 1) >= 8, ]
+
+repeated <- cpmDF_filtered[duplicated(rownames(cpmDF_filtered)), ]
+```
+After all genes with less than 1 cpm in more than 8 samples are removed, there are no duplicate genes. Since each treatment has 8 samples, this means that only genes with greater than 1 cpm in all the samples for at least one treatment are kept, to allow for genes that have very little expression except for in one sample.
+
+```{r}
+make_density_plot <- function(input_matrix){
+  counts_density <- apply(log2(input_matrix), 2, density)
+  #calculate the limits across all the samples
+  xlim <- 0
+  ylim <- 0
+  for (i in 1:length(counts_density)) {
+    xlim <- range(c(xlim, counts_density[[i]]$x))
+    ylim <- range(c(ylim, counts_density[[i]]$y))
+  }
+  cols <- rainbow(length(counts_density))
+  ltys <- rep(1, length(counts_density))
+  #plot the first density plot to initialize the plot
+  plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n", ylab="Smoothing Prob Density", xlab = "log2(Counts per Million)", main="", cex.lab = 0.8)
+  #plot each line
+  for (i in 1:length(counts_density)) lines(counts_density[[i]]$x, counts_density[[i]]$y, col = cols[i])
+  #create legend
+  legend("topright", colnames(cpmDF),
+         col=cols, lty=ltys, cex=0.3,
+         border ="blue", text.col = "green4",
+         merge = TRUE, bg = "gray90")
+  title("Probability Density Plot of Gene Counts")
+}
+```
+
+```{r}
+make_density_plot(cpmDF_filtered)
+```
+In the probability density plot the distribution appears to be left tailed, with a substantial amount of low counts. This may be in part because there are 4 treatments in this experiment, and only a number samples equivalent to 1 treatment had to be greater than 1 cpm for the row to be include(1/4 greater than 1cpm rather than 1/2).
+
+```{r}
+suppressWarnings(boxplot(log2(cpmDF_filtered), xlab = "Samples", ylab = "log2 CPM", las = 2, cex = 0.5, cex.lab = 0.5, cex.axis = 0.5, main = "RNASeq Samples"))
+```
+
+
+We can see that there are many outliers here, more so for the iPSC samples. There seems to be a consistent amount of outliers across the different samples from the same treatment so we will leave them in.
+
+
+### Data Normalization
+
+
+```{r}
+#prepare to normalize the data
+samples <- data.frame(lapply(colnames(cpmDF_filtered),
+FUN=function(x){unlist(strsplit(x, split = "_"))[c(1,2)]}))
+colnames(samples) <- colnames(cpmDF_filtered)
+rownames(samples) <- c("disease_state","cell_type")
+samples <- data.frame(t(samples))
+samples$treatment <- apply(samples[, 1:2], 1, paste, collapse = "_")
+cpmDF_filtered_matrix <- as.matrix(cpmDF_filtered)
+rownames(cpmDF_filtered_matrix) <- rownames(cpmDF_filtered)
+```
+
+```{r}
+d <- edgeR::DGEList(counts=cpmDF_filtered_matrix, group=samples$treatment)
+d <- edgeR::calcNormFactors(d)
+normalized_counts <- edgeR::cpm(d)
+```
+
+```{r}
+make_density_plot(normalized_counts)
+```
+Normalization doesn't seem to have much of an impact on the distribution in this case.
+```{r}
+edgeR::plotMDS.DGEList(normalized_counts, labels=rownames(samples),
+col = c("darkgreen","blue", "yellow", "red")[factor(samples$treatment)], xlim = c(-4, 4))
+title("MDS Analysis of Gene Expression Distances")
+```
+
+We can see here that there is little difference between the Huntingtons disease treatment and the corrected treatment for the iPSCs, but for the neural stems cells(NSC), there is a significant difference in gene expression. This is consistent with the findings reported in the paper associated with this accession. Ring et al. (2015) report that 4,466 genes were differentially expressed in the NSC samples and 370 between the iPSC samples.
+
+```{r}
+model_design <- model.matrix(~ samples$treatment)
+dispersal <- edgeR::estimateDisp(d, model_design)
+#plot the biological coefficient of variation
+edgeR::plotBCV(dispersal ,col.tagwise = "black",col.common = "red")
+title("Biological Coefficient of Variation")
+```
+The trend line here shows that very highly expressed genes have slightly more variation in expression levels between treatments, though overall the amount of variation is fairly even across different expression levels.
+
+
+### Verify HGNC Symbols
+```{r}
+#install HGNChelper if not already installed
+if (!requireNamespace("HGNChelper", quietly = TRUE))
+install.packages("HGNChelper")
+
+# sometimes this statement needs to be run a few times to work. Removing the
+# map argument helps with this but results in less up to date symbols and
+# slightly different results
+checked <- HGNChelper::checkGeneSymbols(rownames(cpmDF_filtered_matrix), species = 'human', map = HGNChelper::getCurrentHumanMap())
+
+```
+```{r}
+dim(checked[which(checked$Approved == FALSE), ])
+head(checked[which(checked$Approved == FALSE), ])
+```
+```{r}
+dim(checked[which(is.na(checked$Suggested.Symbol)), ])
+(checked[which(is.na(checked$Suggested.Symbol)), ])
+```
+According to NCBI, genes starting with LOC are uncharacterized genes that have not yet been assigned symbols. Many of the other genes here seem to be more newly discovered genes, such as genes with the FLJ prefix which may have been discovered by the full-length human cDNA sequencing project (FLJ project) (Maruyama et al., 2009).
+```{r}
+#checking for gene names mapping to multiple symbols(these will have /// between symbols)
+(checked[grep(pattern = "///", x=checked$Suggested.Symbol), ])
+```
+
+```{r}
+checked[516, ]$"Suggested.Symbol" <- "SEPTIN2"
+```
+According to Ziemann, Eren, & El-Osta(2016) , the symbol 2-sep may be a result of microsoft excel automatically converting SEPT2 (SEPTIN2) to a date. This is likely what happened here since the data file was originally in csv format. We will change this name to SEPTIN2.
+```{r}
+checked[752, ]$"Suggested.Symbol" <- NA
+```
+QARS is a previous symbol for both EPRS1 and QARS1 according to HGNC so we will remove this row as it is ambiguous.
+```{r}
+checked[938, ]$"Suggested.Symbol" <- "CHP1"
+```
+CHP likely refers to CHP1, RHOV is a synonym according to PubChem
+```{r}
+checked[1223, ]$"Suggested.Symbol" <- NA
+```
+MLL4 is an alias symbol for both KMT2B and KMT2D according to HGNC so we will remove this row.
+```{r}
+checked[1839, ]$"Suggested.Symbol" <- "SARS1"
+```
+SARS is a previous symbol for SARS1 according to HGNC.
+```{r}
+checked[1919, ]$"Suggested.Symbol" <- "KMT2D"
+```
+MLL2 is a previous symbol for KMT2D according to HGNC.
+```{r}
+checked[2257, ]$"Suggested.Symbol" <- "VPS51"
+```
+C11orf2 is equivalent to VPS51, IFT46 is not a human gene, no human homolog exists according to Genecards and HGNC.
+```{r}
+checked[2491, ]$"Suggested.Symbol" <- NA
+```
+It is ambiguous which of the symbols MUM1 refers to since it is an old symbol for both IRF4 and PWWP3A according to HGNC so we will remove this row
+```{r}
+checked[3411, ]$"Suggested.Symbol" <- NA
+```
+LBHD1 and C11orf98 are splice variants that share an exon. We will remove this row to avoid ambiguity.
+```{r}
+checked[3885, ]$"Suggested.Symbol" <- "KAT14"
+```
+KAT14 seems to be more strongly associated with the name CSRP2BP according to HGNC, which lists CSRP2 binding protein as a previous name.
+```{r}
+checked[4520, ]$"Suggested.Symbol" <- "TENM1"
+```
+ODZ3 was a previous symbol for TENM1 accoding to HGNC
+```{r}
+checked[5306, ]$"Suggested.Symbol" <- NA
+```
+GRINL1A was a previous symbol for POLR2M according to HGNC
+```{r}
+checked[5810, ]$"Suggested.Symbol" <- NA
+```
+B3GNT1 is ambiguous and was a previous symbol for both B3GNT2 and B4GAT1 according to HGNC so we will remove this row from our data.
+```{r}
+checked[6307, ]$"Suggested.Symbol" <- NA
+```
+STRA13 is ambiguous and was a previous symbol for both BHLHE40 and CENPX according to HGNC so we will remove this row from our data.
+```{r}
+checked[6917, ]$"Suggested.Symbol" <- "BRINP1"
+```
+DBC1 was a previous symbol for BRINP1 according to HGNC.
+```{r}
+checked[7904, ]$"Suggested.Symbol" <- "GEMIN2"
+```
+SIP1 was a previous symbol for GEMIN2 according to HGNC.
+```{r}
+checked[8114, ]$"Suggested.Symbol" <- "PALS2"
+```
+MPP6 was a previous symbol for PALS2 according to HGNC.
+```{r}
+checked[8865, ]$"Suggested.Symbol" <- "RAB39A"
+```
+RAB39 was a previous symbol for RAB39A according to HGNC.
+```{r}
+checked[8865, ]$"Suggested.Symbol" <- "MARCHF2"
+checked[8865, ]$"Suggested.Symbol" <- "MARCHF1"
+```
+According to Ziemann, Eren, & El-Osta(2016), the symbols 2-mar and 1-mar may be a result of microsoft excel automatically converting MARCHF2 and MARCHF1 to a date. This is likely what happened here since the data file was originally in csv format.
+```{r}
+checked[12684, ]$"Suggested.Symbol" <- "MOK"
+```
+According to HGNC, RAGE was a previous symbol for MOK, so we will replace RAGE with MOK.
+
+```{r}
+checked[13384, ]$"Suggested.Symbol" <- NA
+```
+AGPAT10 is an alias symbol for both GPAT3 and LPCAT1 according to HGNC so we will remove this row because it is ambiguous.
+```{r}
+#remove transcripts that could not be mapped to HGNC symbols
+dim(normalized_counts)
+normalized_counts_filtered <- normalized_counts[which(!is.na(checked$Suggested.Symbol)), ]
+dim(normalized_counts_filtered)
+```
+
+```{r}
+#set rownames to correct HGNC symbols
+rownames(normalized_counts_filtered) <- checked$Suggested.Symbol[which(!is.na(checked$Suggested.Symbol))]
+```
+
+```{r}
+#write the filtered data to a file
+write.table(data.frame(rownames(normalized_counts_filtered), normalized_counts_filtered), file = "RNA_Seq_Normalized", quote = FALSE, row.names = FALSE, col.names = FALSE, sep = "\t")
+```
+
+We will create two files: one with only genes that mapped unambiguously to up to date HGNC symbols, and one with all non-duplicate genes.
+
+```{r}
+rownames(normalized_counts) <- checked$Suggested.Symbol
+#write the unfiltered data to a file
+write.table(data.frame(rownames(normalized_counts), normalized_counts), file = "RNA_Seq_Normalized_Unfiltered", quote = FALSE, row.names = FALSE, col.names = FALSE, sep = "\t")
+```
+### Summary
+
+Q: What are the control and test conditions of the dataset?
+
+A: The control conditions were the iPSCs since the CAG mutation is beleived to cause Huntingtons disease by impairing the function of neural cells, and the test conditions are the NSCs.
+
+Q: Why is the dataset of interest to you?
+
+A: I am interested in this dataset because I find stem cells interesting as models for disease and I am learning about stem cells in some of my other courses.
+
+Q: Were there expression values that were not unique for specific genes? How did you handle these?
+
+A: Some genes mapped to multiple HUGO symbols. Often this was due to the gene in question having a paralogue or the original gene symbol being obscured due to excel automatically converting the symbol to a date.
+
+Q: Were there expression values that could not be mapped to current HUGO symbols?
+
+A: There were 409 genes that did not map to current HUGO symbols.
+
+Q: How many outliers were removed?
+
+A: No outliers were removed apart from genes with lower than 1 cpm for > 24 samples (all but 1 treatment)
+
+Q: How did you handle replicates?
+
+A: Replicates were put into 4 groups: corrected induced pluripotent stem cells(C116_iPSC), Diseased induced pluripotent stem cells (HD_iPSC), corrected neural stem cell (C116_NSC), and diseased neural stem cells (HD_NSC)
+
+Q: What is the final coverage of your dataset?
+
+A: There are a total of 14864 genes (including those without an up to date symbol) in the final dataset.
+
+
+
+### References
+Naphade, S., Embusch, A., Madushani, K. L., Ring, K. L., &amp; Ellerby, L. M. (2018). Altered expression of matrix metalloproteinases and their endogenous inhibitors in a human isogenic stem cell model of huntington's disease. Frontiers in Neuroscience, 11. doi:10.3389/fnins.2017.00736
+
+Ring, K., An, M., Zhang, N., O’Brien, R., Ramos, E., Gao, F., . . . Ellerby, L. (2015). Genomic analysis reveals disruption of striatal neuronal development and therapeutic targets in human huntington’s disease neural stem cells. Stem Cell Reports, 5(6), 1023-1038. doi:10.1016/j.stemcr.2015.11.005
+
+Ziemann, M., Eren, Y., & El-Osta, A. (2016). Gene name errors are widespread in the scientific literature. Genome Biology, 17(1). doi:10.1186/s13059-016-1044-7
+
+Database, G. (n.d.). GeneCards®: The human Gene Database. Retrieved February 21, 2021, from https://www.genecards.org/
+
+Home: Hugo Gene Nomenclature Committee. (n.d.). Retrieved February 21, 2021, from https://www.genenames.org/
+
+PubChem. (n.d.). CHP. Retrieved February 21, 2021, from https://pubchem.ncbi.nlm.nih.gov/gene/CHP
+
+NCBI. (2018, April 09). Gene frequently asked questions. Retrieved February 23, 2021, from https://www.ncbi.nlm.nih.gov/books/NBK3840/
+
