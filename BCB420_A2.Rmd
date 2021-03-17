@@ -1,0 +1,331 @@
+---
+title: 'Assignment 2: Assignment 2   Differential Gene expression and Preliminary
+  ORA'
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+
+### A1 Recap
+
+The data used was retrieved from GSE74201 and represents bulk RNA-seq data from iPSCs and NSCs that either contain the Huntington's disease causing CAG repeat(HD) or have had this repeat removed(C116). The papers "Genomic Analysis Reveals Disruption of Striatal Neuronal Development and Therapeutic Targets in Human Huntington's Disease Neural Stem Cells" by Ring et al. (2015) and "Altered Expression of Matrix Metalloproteinases and Their Endogenous Inhibitors in a Human Isogenic Stem Cell Model of Huntington's Disease" by Naphade et al.(2017) are associated with this accesion. 
+
+Data cleaning and normalization in A1 resulted in a reduction from 22506 genes to 14864 genes. There were no duplicates after removing all genes with less than 1cpm, before checking updating symbols. After normalization, PCA/MDS analysis showed a substantial difference between iPSC samples and NSC samples, with large separation between healthy and diseased NSC cells but not between iPSC cells.
+
+### Differential Gene Expression 
+
+We will start by loading in the normalized expression data. We will use the one
+that doesn't include genes with ambiguous symbols(see assignment 1)
+```{r}
+exp_table <- read.table("RNA_Seq_Normalized", header = TRUE, sep = "\t")
+exp_table
+```
+
+We will create a heatmap to visualize the relative expression of genes of different groups and to see which samples cluster together using the dendogram. We expect that samples that are close in the MDS analysis will most likely cluster together.
+```{r}
+#install the package ComplexHeatmap if it isn't already installed
+if (!requireNamespace("ComplexHeatmap"))
+  install.packages("ComplexHeatmap")
+
+#install the package circlize if it isn't already installed
+if (!requireNamespace("circlize"))
+  install.packages("circlize")
+
+
+exp_matrix <- as.matrix(exp_table[ , 2:ncol(exp_table)])
+rownames(exp_matrix) <- exp_table[ ,1]
+colnames(exp_matrix) <- colnames(exp_table)[2:33]
+scaled_matrix <- t(scale(t(exp_matrix)))
+
+heatmap_col = circlize::colorRamp2(c(min(scaled_matrix), 0, max(scaled_matrix)), c("blue", "white", "red"))
+
+heatmap <- ComplexHeatmap::Heatmap(scaled_matrix, name ="Scaled Expression Level", show_row_dend = TRUE,show_column_dend = TRUE,
+col=heatmap_col,show_column_names = TRUE,
+show_row_names = FALSE,show_heatmap_legend = TRUE, column_title = "Gene Expression Levels in NSCs and iPSCs")
+
+heatmap
+
+```
+
+We can see here that the different cell types (iPSC and NSC) cluster together very strongly. We can also see that there is more of a difference between the Huntington's disease samples and the corrected samples for the NSCs than the iPSCs, which is consistent with what was seen in the MDS plot from A1 and in the original publication(Ring et al., 2015).
+
+```{r}
+if (!requireNamespace("limma"))
+  install.packages("limma")
+limma::plotMDS(exp_matrix, col = c(rep(c("darkgreen"),8), rep(c("blue"),8), rep(c("purple"),8), rep(c("red"),8)), xlim = c(-350, 350))
+title("MDS Analysis of Gene Expression Distances")
+legend("bottomright", c("Huntington's NSC", "Corrected NSC", "Huntington's iPSC", "Corrected iPSC"),
+         col=c("purple", "darkgreen", "red", "blue"), pch = c(20, 20, 20, 20), cex = 0.65)
+```
+
+
+We will now create a model specifying treatment groups for our differential expression(DE) analysis.
+
+```{r}
+#Define model for analysis
+samples <- data.frame(lapply(colnames(exp_matrix),
+FUN=function(x){unlist(strsplit(x, split = "_"))[c(1,2)]}))
+colnames(samples) <- colnames(exp_matrix)
+rownames(samples) <- c("disease_state","cell_type")
+samples <- data.frame(t(samples))
+samples$treatment <- apply(samples[, 1:2], 1, paste, collapse = "_")
+
+#separate matrix by cell type
+nsc_matrix <- exp_matrix[ , grep(pattern = "NSC", colnames(exp_matrix))]
+nsc_samples <- samples[which(samples$cell_type == "NSC"), ]
+ipsc_matrix <- exp_matrix[ , grep(pattern = "iPSC", colnames(exp_matrix))]
+ipsc_samples <- samples[which(samples$cell_type == "iPSC"), ]
+
+model <- model.matrix(~ samples$treatment)
+nsc_model <- model.matrix(~ nsc_samples$disease_state)
+ipsc_model <- model.matrix(~ ipsc_samples$disease_state)
+
+```
+
+We will use the quasi-Likelyhood method with the edgeR package to determine which genes are significantly differentially expressed, because the experimental design has multiple factors and quasi-Likelyhood works well for bulk RNA-seq data. We will use a threshold of 0.05 since this is a common scientific standard for significance.
+
+```{r}
+#install edgeR if not already installed
+if (!requireNamespace("edgeR"))
+  install.packages("edgeR")
+
+#see how many genes are differentially expressed in the NSC samples
+nsc_d = edgeR::DGEList(counts=nsc_matrix, group=nsc_samples$disease_state)
+nsc_d <- edgeR::estimateDisp(nsc_d, nsc_model)
+nsc_fit <- edgeR::glmQLFit(nsc_d, nsc_model)
+nsc_glm <- edgeR::glmQLFTest(nsc_fit, coef='nsc_samples$disease_stateHD')
+nsc_all <- edgeR::topTags(nsc_glm, n = nrow(nsc_glm$table))
+
+# number of DE genes in NSCs by P val
+length(which(nsc_all$table$PValue < 0.05))
+#number of NSC genes that pass correction
+length(which(nsc_all$table$FDR < 0.05))
+
+#see how many genes are differentially expressed in the iPSC samples
+ipsc_d = edgeR::DGEList(counts=ipsc_matrix, group=ipsc_samples$disease_state)
+ipsc_d <- edgeR::estimateDisp(ipsc_d, ipsc_model)
+ipsc_fit <- edgeR::glmQLFit(ipsc_d, ipsc_model)
+ipsc_glm <- edgeR::glmQLFTest(ipsc_fit, coef='ipsc_samples$disease_stateHD')
+ipsc_all <- edgeR::topTags(ipsc_glm, n = nrow(ipsc_glm$table))
+
+#number of DE iPSC genes by P val
+length(which(ipsc_all$table$PValue < 0.05))
+#number of iPSC genes that pass correction
+length(which(ipsc_all$table$FDR < 0.05))
+```
+
+There appears to be many more genes differentially expressed in the NSC samples(2203) than between the iPSC samples(371). 1108 of the genes in the NSC samples pass correction and 77 in the iPSC samples pass correction. This is roughly consistent with what was seen one of the original papers (Ring et al., 2015) in terms of the difference between the samples. The original paper found 370 genes differentially expressed between the iPSC samples and 4,466 genes differentially expressed between the NSC samples. These differences might be due to the removal of low count genes and duplicates.
+
+```{r}
+#Plot the differentially expressed genes in NSC cells
+volcanoData <- cbind(nsc_all$table$logFC, -log10(nsc_all$table$PValue))
+colnames(volcanoData) <- c("logFC", "negLogPval")
+plot(volcanoData, pch = 20)
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP2"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP2"), ]["negLogPval"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP17"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP17"), ]["negLogPval"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP14"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP14"), ]["negLogPval"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP15"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP15"), ]["negLogPval"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP16"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP16"), ]["negLogPval"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TIMP3"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TIMP3"), ]["negLogPval"], pch = 20, col="green", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TIMP1"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TIMP1"), ]["negLogPval"], pch = 20, col="green", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TGFB1"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TGFB1"), ]["negLogPval"], pch = 20, col="orange", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TGFB2"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TGFB2"), ]["negLogPval"], pch = 20, col="orange", cex=1.1))
+
+abline(-log10(0.05), 0, col = "blue", pch = 21)
+title("Volcano Plot NSC Samples")
+legend("topleft", c("MMP Family Member", "TIMP Family Member", "TGF-B Family Member", "p > 0.05"),
+         col=c("red", "green", "orange", "blue"), pch = c(20, 20, 20, NA), lty = c(NA, NA, NA, 1), cex = 0.65)
+
+```
+```{r}
+#Plot the differentially expressed genes in iPSC cells
+volcanoData <- cbind(ipsc_all$table$logFC, -log10(ipsc_all$table$PValue))
+colnames(volcanoData) <- c("logFC", "negLogPval")
+plot(volcanoData, pch = 20)
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP2"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP2"), ]["negLogPval"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP14"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP14"), ]["negLogPval"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP15"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP15"), ]["negLogPval"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP16"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP16"), ]["negLogPval"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TIMP3"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TIMP3"), ]["negLogPval"], pch = 20, col="green", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TIMP1"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TIMP1"), ]["negLogPval"], pch = 20, col="green", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TGFB1"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TGFB1"), ]["negLogPval"], pch = 20, col="orange", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TGFB2"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TGFB2"), ]["negLogPval"], pch = 20, col="orange", cex=1.1))
+abline(-log10(0.05), 0, col = "blue", pch = 21)
+title("Volcano Plot iPSC Samples")
+legend("topleft", c("MMP Family Member", "TIMP Family Member", "TGF Family Member", "p > 0.05"),
+         col=c("red", "green", "orange", "blue"), pch = c(20, 20, 20, NA), lty = c(NA, NA, NA, 1), cex = 0.7)
+```
+
+
+We can see that there are more significantly differentially expressed genes between the two NSC samples than in the iPSC samples because the negative log p value for the NSC cells was higher for more genes. It appears that of the very significantly DE genes, a slightly larger number were upregulated in the Huntington's disease treatments(especially for NSCs) than in the corrected cells since there appears to be slightly more large positive -log p values than there are large negative -log p values.
+
+According to the associated paper "Altered Expression of Matrix Metalloproteinases and Their Endogenous Inhibitors in a Human Isogenic Stem Cell Model of Huntington's Disease" (Naphade et al., 2017), Matrix Metalloproteinases (MMPs) were found to be strongly differentially expressed between NSCs with Huntington's disease and those without, as were tissue inhibitors of matrix metalloproteinases(TIMPs). In particular, the paper noted MMP2, MMP9, MMP10, MMP11, MM14, MMP15, MMP16, MMP17, MMP28, TIMP1 and TIMP3. MMP10, MMP17, and MMP28 had especially differering expression levels in NSCs. Unfortunately, MMP9, MMP10, MMP11, MMP28, were removed earlier due to very low expression levels (<1 cpm). MMP2, a protein from this family is colored in red in the plots. Of the proteins that did make it to the final dataset, 3 out of the 5 had P values less than 0.05 in NSCs. The significance of the diffential expression of these proteins is lower than in the associated papers, which may partly be because they did not remove very low count genes or duplicates, which may have led to slightly different normalized expression levels or p-values. In general, the direction of change in expression of these proteins is consistent with what was reported in Naphade et al. (2017) The other paper (Ring et al., 2015) also notes that ORA indicated that the TGF-B pathway was overrepresented amoung differentially expressed genes, but did not indicate specifically that TGF-B1 or TGF-B2 were differentially expressed. We can see here that TGF-B1(orange) is significantly differentially expressed in the NSC samples, but TGF-B2(orange) is not  
+```{r}
+nsc_all$table[which(rownames(nsc_all$table) == "MMP2" | rownames(nsc_all$table) == "MMP14" | rownames(nsc_all$table) == "MMP15" | rownames(nsc_all$table) == "MMP16" | rownames(nsc_all$table) == "TIMP3" | rownames(nsc_all$table) == "TIMP1" | rownames(nsc_all$table) == "TIMP1" | rownames(nsc_all$table) == "MMP17" | rownames(nsc_all$table) == "TGFB1" | rownames(nsc_all$table) == "TGFB2"), ]
+```
+
+
+We will now make volcano plots with the corrected P-value
+
+
+```{r}
+#Plot the differentially expressed genes in NSC cells
+volcanoData <- cbind(nsc_all$table$logFC, -log10(nsc_all$table$FDR))
+colnames(volcanoData) <- c("logFC", "negLogFDR")
+plot(volcanoData, pch = 20)
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP2"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP2"), ]["negLogFDR"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP14"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP14"), ]["negLogFDR"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP15"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP15"), ]["negLogFDR"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP16"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP16"), ]["negLogFDR"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TIMP3"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TIMP3"), ]["negLogFDR"], pch = 20, col="green", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TIMP1"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TIMP1"), ]["negLogFDR"], pch = 20, col="green", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TGFB1"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TGFB1"), ]["negLogFDR"], pch = 20, col="orange", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TGFB2"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TGFB2"), ]["negLogFDR"], pch = 20, col="orange", cex=1.1))
+abline(-log10(0.05), 0, col = "blue", pch = 21)
+title("Volcano Plot NSC Samples Corrected")
+legend("topleft", c("MMP Family Member", "TIMP Family Member", "TGF Family Member", "p > 0.05"),
+         col=c("red", "green", "orange", "blue"), pch = c(20, 20, 20, NA), lty = c(NA, NA, NA, 1), cex = 0.7)
+
+```
+```{r}
+#Plot the differentially expressed genes in iPSC cells
+volcanoData <- cbind(nsc_all$table$logFC, -log10(ipsc_all$table$FDR))
+colnames(volcanoData) <- c("logFC", "negLogFDR")
+plot(volcanoData, pch = 20)
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP2"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP2"), ]["negLogFDR"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP14"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP14"), ]["negLogFDR"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP15"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP15"), ]["negLogFDR"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "MMP16"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "MMP16"), ]["negLogFDR"], pch = 20, col="red", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TIMP3"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TIMP3"), ]["negLogFDR"], pch = 20, col="green", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TIMP1"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TIMP1"), ]["negLogFDR"], pch = 20, col="green", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TGFB1"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TGFB1"), ]["negLogFDR"], pch = 20, col="orange", cex=1.1))
+suppressWarnings(points(x=volcanoData[which(rownames(nsc_all) == "TGFB2"), ]["logFC"], y=volcanoData[which(rownames(nsc_all) == "TGFB2"), ]["negLogFDR"], pch = 20, col="orange", cex=1.1))
+abline(-log10(0.05), 0, col = "blue", pch = 21)
+title("Volcano Plot iPSC Samples Corrected")
+legend("topleft", c("MMP Family Member", "TIMP Family Member", "TGF Family Member", "p > 0.05"),
+         col=c("red", "green", "orange", "blue"), pch = c(20, 20, 20, NA), lty = c(NA, NA, NA, 1), cex = 0.7)
+```
+
+
+When we plot the corrected p-value, we see that MMP2, MMP14 and TIMP3 remain significant for the NSC samples.
+
+
+### Thresholded over-representation analysis
+
+In order to perform ORA, we will use the threshold method to put the significantly DE genes into separate lists based on the cell type they are from and whether the gene is up or down regulated in the cells affected by Huntington's disease. The Thresholded list method was used here because there are more tools available for this method. The gprofiler2 package was used to perform the ORA because it is capable of retrieving data from different combinations of annotation sources, most of which are up to date.
+```{r}
+nsc_significant_genes <- nsc_all$table[which(nsc_all$table$PValue < 0.05), ]
+dim(nsc_significant_genes)[1]
+
+nsc_threshold_list <- cbind(rownames(nsc_significant_genes), nsc_significant_genes)
+colnames(nsc_threshold_list) <- c("gene", colnames(nsc_significant_genes))
+
+nsc_pos_sig_gene <- nsc_threshold_list[which(nsc_threshold_list$logFC > 0), ]
+nsc_neg_sig_gene <- nsc_threshold_list[which(nsc_threshold_list$logFC < 0), ]
+
+write.table(nsc_significant_genes, file = "thresholded_all_genes.txt", quote = FALSE, row.names = FALSE, col.names = TRUE, sep = "\t")
+
+write.table(nsc_pos_sig_gene, file = "thresholded_pos_genes.txt", quote = FALSE, row.names = FALSE, col.names = TRUE, sep = "\t")
+
+write.table(nsc_neg_sig_gene, file = "thresholded_neg_genes.txt", quote = FALSE, row.names = FALSE, col.names = TRUE, sep = "\t")
+```
+
+```{r}
+ipsc_significant_genes <- ipsc_all$table[which(ipsc_all$table$PValue < 0.05), ]
+dim(ipsc_significant_genes)[1]
+
+ipsc_threshold_list <- cbind(rownames(ipsc_significant_genes), ipsc_significant_genes)
+colnames(ipsc_threshold_list) <- c("gene", colnames(nsc_significant_genes))
+
+ipsc_pos_sig_gene <- ipsc_threshold_list[which(ipsc_threshold_list$logFC > 0), ]
+ipsc_neg_sig_gene <- ipsc_threshold_list[which(ipsc_threshold_list$logFC < 0), ]
+
+write.table(ipsc_significant_genes, file = "thresholded_all_genes.txt", quote = FALSE, row.names = FALSE, col.names = TRUE, sep = "\t")
+
+write.table(ipsc_pos_sig_gene, file = "thresholded_pos_genes.txt", quote = FALSE, row.names = FALSE, col.names = TRUE, sep = "\t")
+
+write.table(ipsc_neg_sig_gene, file = "thresholded_neg_genes.txt", quote = FALSE, row.names = FALSE, col.names = TRUE, sep = "\t")
+```
+
+I will use annotation data from GO: Biological Processes, Reactome, and wiki-pathways, because in class it was mentioned that these sources are usually up to date.
+
+```{r}
+if (!requireNamespace("gprofiler2"))
+  install.packages("gprofiler2")
+
+#perform differential expression analysis of all NSC samples
+nsc_all_results <- gprofiler2::gost(nsc_threshold_list$gene, organism = "hsapiens", ordered_query = TRUE,
+                 custom_bg = rownames(nsc_matrix), sources = c("GO:BP", "REAC", "WP"), significant = FALSE)
+
+#perform differential expression analysis of the positive NSC samples
+nsc_pos_results <- gprofiler2::gost(nsc_pos_sig_gene$gene, organism = "hsapiens", ordered_query = TRUE,
+                 custom_bg = rownames(nsc_matrix), sources = c("GO:BP", "REAC", "WP"), significant = FALSE)
+
+#perform differential expression analysis of the negative NSC samples
+nsc_neg_results <- gprofiler2::gost(nsc_neg_sig_gene$gene, organism = "hsapiens", ordered_query = TRUE,
+                 custom_bg = rownames(nsc_matrix), sources = c("GO:BP", "REAC", "WP"), significant = FALSE)
+
+#perform differential expression analysis of all iPSC samples
+ipsc_all_results <- gprofiler2::gost(ipsc_threshold_list$gene, organism = "hsapiens", ordered_query = TRUE,
+                 custom_bg = rownames(nsc_matrix), sources = c("GO:BP", "REAC", "WP"), significant = FALSE)
+
+#perform differential expression analysis of the positive iPSC samples
+ipsc_pos_results <- gprofiler2::gost(ipsc_pos_sig_gene$gene, organism = "hsapiens", ordered_query = TRUE, custom_bg = rownames(nsc_matrix), sources = c("GO:BP", "REAC", "WP"), significant = FALSE)
+
+#perform differential expression analysis of the negative iPSC samples
+ipsc_neg_results <- gprofiler2::gost(ipsc_neg_sig_gene$gene, organism =
+                                       "hsapiens", ordered_query = TRUE,
+                                     custom_bg = rownames(nsc_matrix),
+                                     sources = c("GO:BP", "REAC", "WP"),
+                                     significant = FALSE)
+```
+```{r}
+#create a table of only the OR pathways with less than 300 associated genes that are statistically significant for NSC genes up-regulated in HD samples
+suppressWarnings(nsc_pos_results$result[which(nsc_pos_results$result$term_size < 300 & nsc_pos_results$result$significant == TRUE) ,])
+```
+
+```{r}
+#create a table of only the OR pathways with less than 300 associated genes that are statistically significant for NSC genes down-regulated in HD samples
+suppressWarnings(nsc_neg_results$result[which(nsc_neg_results$result$term_size < 300 & nsc_neg_results$result$significant == TRUE) ,])
+```
+
+
+```{r}
+#create a table of only the OR pathways with less than 300 associated genes that are statistically significant for all available NSC genes
+suppressWarnings(nsc_all_results$result[which(nsc_all_results$result$term_size < 300 & nsc_all_results$result$significant == TRUE) ,])
+```
+
+
+```{r}
+#create a table of only the OR pathways with less than 300 associated genes that are statistically significant for iPSC genes up-regulated in HD samples
+suppressWarnings(ipsc_pos_results$result[which(ipsc_pos_results$result$term_size < 300 & ipsc_pos_results$result$significant == TRUE) ,])
+```
+
+```{r}
+#create a table of only the OR pathways with less than 300 associated genes that are statistically significant for iPSC genes down-regulated in HD samples
+suppressWarnings(ipsc_neg_results$result[which(ipsc_neg_results$result$term_size < 300 & ipsc_neg_results$result$significant == TRUE) ,])
+```
+```{r}
+#create a table of only the OR pathways with less than 300 associated genes that are statistically significant for all iPSC genes
+suppressWarnings(ipsc_all_results$result[which(ipsc_all_results$result$term_size < 300 & ipsc_all_results$result$significant == TRUE) ,])
+```
+
+
+There 3 significant enriched pathways among the DE data with small term sizes (<300 genes) for the  positive FC iPSC samples. There 13 significant enriched pathways among the DE data with small term sizes (<300 genes) for the  positive FC iPSC samples. There were 43 over-represented pathways and processes for all the iPSC genes. There is 153 pathway that is significantly over-represented for the NSCs with Huntington's disease for the positive FC genes, and 84 over-represented pathways with under-expressed(neg) genes in the Huntington's disease samples. When all the NSC samples are analyzed together, there are 254 significantly over-represented pathways. Many of the over-represented pathways in the NSCs appear to be pathways for transporting proteins to membranes while or shortly after translation.
+
+### Interpretation
+
+The DE analysis did support the authors' conclusion in the first article (Ring et al., 2015) that there is more of a difference in expression in cells with Hunington's disease(HD) and cells without(C116) in NSCs than iPSCs. However, it only somewhat supported the conclusions of the second paper that MMPs and TIMPs are differentially expressed in cells with Huntington's disease. Many of the MMPs and TIMPs examined in second paper (Naphade et al., 2017) had very low expression levels, especially those with extremely different expression in the Huntington's disease NSCs compared to the corrected NSCs. Of those that did have significantly large counts, not all of them were differentially expressed in a significant way. 3/5 were, with MMP2 have an extremely small p-value. All of the MMP and TIMP family members that were indicated as having increased expression in the original paper have increased expression in this analysis, and vice versa(though not always significantly). Some of these differences might be due to the original paper not removing genes with very low counts and duplicate genes, which could have led to slightly different normalization and differential expression analysis results. There is some reprentation of TGF-B related pathways among the significant over-represented pathways for the NSC cells, which is somewhat consistent with the results of the Ring et al. (2015) paper, though these are not the top over-represented pathways here as they were in the original paper. This may be due the removal of low count genes which were not removed in the original paper. In this analysis the top over-represented pathways down-regulated pathways in NSCs seem to be related to to vescicular transport of proteins to membranes (ex: "SRP-dependent cotranslational protein targeting to membrane", "cotranslational protein targeting to membrane", "protein targeting to ER"). A 2002 paper "Early transcriptional profiles in huntingtin-inducible striatal cells by microarray analyses" by Sipione et al. indicates that microarray experiments showed differential expression of genes involved in vesicle trafficing, which would support the idea that transport of proteins from the nucleus to membranes could be affected by Huntington's disease.
+
+### References 
+
+Ring, K., An, M., Zhang, N., O’Brien, R., Ramos, E., Gao, F., . . . Ellerby, L. (2015). Genomic analysis reveals disruption of striatal neuronal development and therapeutic targets in human huntington’s disease neural stem cells. Stem Cell Reports, 5(6), 1023-1038. doi:10.1016/j.stemcr.2015.11.005
+
+Naphade, S., Embusch, A., Madushani, K. L., Ring, K. L., & Ellerby, L. M. (2018). Altered expression of matrix metalloproteinases and their endogenous inhibitors in a human isogenic stem cell model of huntington's disease. Frontiers in Neuroscience, 11. doi:10.3389/fnins.2017.00736
+
+Sipione, S., Rigamonti, D., Valenza, M., Zuccato, C., Conti, L., Pritchard, J., . . . Cattaneo, E. (2002). Early transcriptional profiles in huntingtin-inducible striatal cells by microarray analyses. Human Molecular Genetics, 11(17), 1953-1965. doi:10.1093/hmg/11.17.1953
